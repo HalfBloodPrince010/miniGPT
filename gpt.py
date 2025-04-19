@@ -161,12 +161,82 @@ class Head(nn.Module):
         return out
 
 
+class MultiAttentionHead(nn.Module):
+    """multiple heads of self-attention in parallel"""
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.proj = nn.Linear(n_embd, n_embd)
+
+    def forward(self, x):
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.proj(out)
+        return out
+
+class FeedFoward(nn.Module):
+    """
+        A simple linear layer followed by a non-linearity.
+        Note, idea here is after token communicate with each other
+        with attention mechanism, where each self-attention head captures
+        different information.
+
+        We want these token to ponder on it. Hence we are this simple feed
+        forward NN, where this is applied on the individual token level.
+        Basically each token after getting different information, thinks on its
+        own.
+    """
+
+    def __init__(self, n_embd):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, 4 * n_embd),
+            nn.ReLU(),
+            nn.Linear(4 * n_embd, n_embd),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class Block(nn.Module):
+    """
+       Like in GPT Paper, we want to repeat the Attention and Feed Forward Network Multiple time.
+       This is a block. And, this captures it.
+    """
+
+    def __init__(self, n_embd, n_head):
+        super().__init__()
+        head_size = n_embd // n_head
+        self.sa = MultiAttentionHead(n_head, head_size) # Now instead of 1 head self-attention head of 32 dim, we have 4 attention head of 8 dim each.
+        self.ffwd = FeedFoward(n_embd)
+
+    def forward(self, x):
+        """
+        We have added residual Connection. These helps with Vanishing Gradients problem with deep neural networks.
+        Also, helps in providing a direct path for gradients to flow backward (via the identity addition).
+        This is also called the residual highway.
+        It also helps in Preservation of Information: The addition of the input x back into the output also ensures
+        that no sub-layer can “wash out” the original input information. This is especially important after the
+        self-attention sub-layer. The self-attention mechanism computes weighted combinations of inputs and, at
+        initial random weights, its output can be almost uncorrelated with the original input sequence.
+        The residual addition guarantees that the original token representations are carried forward. Without it,
+        the model could lose track of the input content after just one attention layer
+        """
+        x = x + self.sa(x)
+        x = x + self.ffwd(x)
+        return x
+
+
 class MiniGPT(nn.Module):
     def __init__(self):
         super().__init__()
         self.token_embedding = nn.Embedding(vocab_size, n_embd)
         self.position_embedding = nn.Embedding(block_size, n_embd)
-        self.sa_head = Head(n_embd)
+        self.blocks = nn.Sequential(
+            Block(n_embd, n_head=4),
+            Block(n_embd, n_head=4),
+            Block(n_embd, n_head=4),
+        )
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
@@ -176,7 +246,7 @@ class MiniGPT(nn.Module):
         tok_embd = self.token_embedding(idx)
         pos_embd = self.position_embedding(torch.arange(T, device=device)) # (T,C) arange--> 0, block_size-1, each T gets a pos embedding.
         x = tok_embd + pos_embd # (B,T,C)
-        x = self.sa_head(x) # (B,T,C)
+        x = self.blocks(x) # (B, T, C)
         logits = self.lm_head(x)
 
         if targets is None:
